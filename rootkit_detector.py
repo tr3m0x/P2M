@@ -136,7 +136,9 @@ class BPFToolAnalyzer:
         # We completely ignore benign helpers like bpf_probe_read or bpf_map_lookup.
         tampering_ops = [
             'bpf_probe_write_user',  # Overwrites user-space memory
-            'bpf_override_return'    # Hijacks system call return values
+            'bpf_override_return', # Hijacks system call return values
+            "bpf_trace_printk",
+            "bpf_probe_write_metadata"
         ]
 
         for op in tampering_ops:
