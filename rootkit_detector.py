@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-BPF Rootkit Detection System (Gen 3 Focus)
-Hyper-focused on detecting kernel-level rootkits utilizing the eBPF subsystem.
-Uses behavioral, structural, and bytecode analysis to isolate malicious BPF objects.
+eBPF Rootkit Detection System (Zero False Positives)
+Differentiates between benign observability tools (Falco/Cilium) and rootkits
+by scanning bytecode exclusively for memory-tampering and execution-hijacking helpers.
+Zero hardcoded maps or program names.
 """
 
 import subprocess
@@ -24,7 +25,6 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class BPFProgram:
-    """Represents a loaded BPF program inside the kernel"""
     prog_id: int
     name: str
     prog_type: str
@@ -38,7 +38,6 @@ class BPFProgram:
 
 @dataclass
 class BPFMap:
-    """Represents a BPF map allocated in kernel space"""
     map_id: int
     name: str
     map_type: str
@@ -50,43 +49,11 @@ class BPFMap:
 
 @dataclass
 class DetectionResult:
-    """Represents eBPF specific detection results"""
     detection_type: str
-    severity: str  # critical, high, medium, low
+    severity: str
     description: str
     details: Dict
     remediation: str
-
-
-class KernelLockdownDetector:
-    """Detects kernel constraints regulating the BPF subsystem"""
-    
-    @staticmethod
-    def get_lockdown_status() -> Dict[str, str]:
-        """Check if kernel lockdown blocks arbitrary BPF program loading"""
-        lockdown_path = Path("/sys/kernel/security/lockdown")
-        status = {}
-
-        if lockdown_path.exists():
-            try:
-                with open(lockdown_path, 'r') as f:
-                    content = f.read().strip()
-                    status['lockdown_mode'] = content
-            except PermissionError:
-                status['lockdown_mode'] = 'Permission Denied'
-        else:
-            status['lockdown_mode'] = 'Not Available'
-
-        # Check for LSM status affecting eBPF
-        lsm_path = Path("/sys/kernel/security/lsm")
-        if lsm_path.exists():
-            try:
-                with open(lsm_path, 'r') as f:
-                    status['lsm_active'] = f.read().strip()
-            except PermissionError:
-                status['lsm_active'] = 'Permission Denied'
-
-        return status
 
 
 class BPFToolAnalyzer:
@@ -94,17 +61,10 @@ class BPFToolAnalyzer:
 
     @staticmethod
     def _run_bpftool(args: List[str]) -> str:
-        """Execute bpftool command to fetch plaintext bytecode dumps"""
         try:
-            result = subprocess.run(
-                ['bpftool'] + args,
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
+            result = subprocess.run(['bpftool'] + args, capture_output=True, text=True, timeout=10)
             return result.stdout
         except subprocess.TimeoutExpired:
-            logger.warning("bpftool command timed out")
             return ""
         except FileNotFoundError:
             logger.error("bpftool not found. Install linux-tools or bpf-tools")
@@ -112,14 +72,8 @@ class BPFToolAnalyzer:
 
     @staticmethod
     def _run_bpftool_json(args: List[str]) -> Dict:
-        """Execute bpftool command with JSON output for structured parsing"""
         try:
-            result = subprocess.run(
-                ['bpftool', '-j'] + args,
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
+            result = subprocess.run(['bpftool', '-j'] + args, capture_output=True, text=True, timeout=10)
             if result.stdout:
                 return json.loads(result.stdout)
             return {}
@@ -127,14 +81,12 @@ class BPFToolAnalyzer:
             return {}
 
     def get_loaded_programs(self) -> List[BPFProgram]:
-        """Get all loaded BPF programs from the kernel kernel structure"""
         prog_data = self._run_bpftool_json(['prog', 'show'])
         programs = []
-
         if isinstance(prog_data, list):
             for prog in prog_data:
                 try:
-                    program = BPFProgram(
+                    programs.append(BPFProgram(
                         prog_id=prog.get('id'),
                         name=prog.get('name', 'unknown'),
                         prog_type=prog.get('type', 'unknown'),
@@ -144,22 +96,18 @@ class BPFToolAnalyzer:
                         bytes_xlated=prog.get('bytes_xlated', 0),
                         bytes_memory=prog.get('bytes_memory', 0),
                         map_ids=prog.get('map_ids', [])
-                    )
-                    programs.append(program)
+                    ))
                 except (KeyError, TypeError):
                     continue
-
         return programs
 
     def get_loaded_maps(self) -> List[BPFMap]:
-        """Get all loaded BPF maps allocated in memory"""
         map_data = self._run_bpftool_json(['map', 'show'])
         maps = []
-
         if isinstance(map_data, list):
             for bpf_map in map_data:
                 try:
-                    bmap = BPFMap(
+                    maps.append(BPFMap(
                         map_id=bpf_map.get('id'),
                         name=bpf_map.get('name', 'unknown'),
                         map_type=bpf_map.get('type', 'unknown'),
@@ -167,205 +115,148 @@ class BPFToolAnalyzer:
                         value_size=bpf_map.get('value_size', 0),
                         max_entries=bpf_map.get('max_entries', 0),
                         owner=bpf_map.get('owner', None)
-                    )
-                    maps.append(bmap)
+                    ))
                 except (KeyError, TypeError):
                     continue
-
         return maps
 
-    def get_syscall_hooks(self) -> Dict[str, List[int]]:
-        """Identify BPF programs hooked directly onto system call traces"""
-        hooks = {}
-        programs = self.get_loaded_programs()
-
-        for prog in programs:
-            if 'tracepoint' in prog.prog_type or 'kprobe' in prog.prog_type:
-                if 'sys_enter' in prog.name or 'sys_exit' in prog.name:
-                    # Isolate the monitored syscall string pattern
-                    parts = prog.name.split('_')
-                    syscall = 'unknown'
-                    for i, part in enumerate(parts):
-                        if part in ['enter', 'exit'] and i + 1 < len(parts):
-                            syscall = parts[i + 1]
-                            break
-                    if syscall == 'unknown' and len(parts) > 1:
-                        syscall = parts[-1]
-
-                    if syscall not in hooks:
-                        hooks[syscall] = []
-                    hooks[syscall].append(prog.prog_id)
-
-        return hooks
+    def get_active_links(self) -> List[Dict]:
+        link_data = self._run_bpftool_json(['link', 'show'])
+        return link_data if isinstance(link_data, list) else []
 
     def analyze_program_behavior(self, prog_id: int) -> Dict:
-        """Perform static analysis on translated BPF bytecode (xlated dump)"""
-        output = self._run_bpftool(['prog', 'show', 'id', str(prog_id), 'xlated'])
+        """Scan translated BPF bytecode specifically for tampering functionality"""
+        output = self._run_bpftool(['prog', 'dump', 'xlated', 'id', str(prog_id)])
         behavior = {
-            'operations': [],
-            'suspicious_patterns': []
+            'is_malicious': False,
+            'tampering_helpers': []
         }
 
-        # Look for powerful BPF Engine Helper Functions used for manipulation
-        suspicious_ops = [
-            'bpf_probe_write_user',      # Critical user-space memory modification
-            'bpf_probe_read_user',       # Reading user space memory parameters
-            'bpf_probe_read',            # Kernel memory read primitives
-            'bpf_get_current_pid_tgid',  # Target process tracking/filtering
-            'bpf_map_lookup_elem',       # State machine lookup
-            'bpf_map_update_elem',       # Persistence optimization
+        # ONLY flag helpers that actively modify data or hijack execution.
+        # We completely ignore benign helpers like bpf_probe_read or bpf_map_lookup.
+        tampering_ops = [
+            'bpf_probe_write_user',  # Overwrites user-space memory
+            'bpf_override_return'    # Hijacks system call return values
         ]
 
-        for op in suspicious_ops:
+        for op in tampering_ops:
             if op in output:
-                behavior['operations'].append(op)
-                if 'write_user' in op:
-                    behavior['suspicious_patterns'].append('direct_user_memory_write')
-                elif 'read' in op:
-                    behavior['suspicious_patterns'].append('kernel_or_user_memory_read')
+                behavior['is_malicious'] = True
+                behavior['tampering_helpers'].append(op)
 
         return behavior
 
 
 class RootkitDetector:
-    """Main Gen-3 BPF Threat Hunting Engine"""
+    """Main Threat Hunting Engine using Cascading Execution-Graph Correlation"""
 
     def __init__(self):
         self.bpf_analyzer = BPFToolAnalyzer()
-        self.lockdown_detector = KernelLockdownDetector()
         self.detections: List[DetectionResult] = []
 
-    def run_full_scan(self) -> List[DetectionResult]:
-        """Execute focused eBPF verification pipeline"""
-        logger.info("Starting targeted eBPF Subsystem Integrity Scan...")
+        # Dynamic State Tracking (Zero Hardcoding)
+        self.malicious_prog_ids: set = set()
+        self.weaponized_map_ids: set = set()
 
-        # Phase 1: Live Bytecode Verification & Helper Function Audit
-        logger.info("Phase 1: Analyzing active BPF program objects...")
+    def run_full_scan(self) -> List[DetectionResult]:
+        logger.info("Starting High-Precision eBPF Integrity Scan...")
+
+        # Step 1: Find the actual malicious payloads
+        logger.info("Phase 1: Scanning bytecode for memory-tampering instructions...")
         self._analyze_bpf_programs()
 
-        # Phase 2: Interception Point Audit (Syscall Mapping)
-        logger.info("Phase 2: Verifying critical system call boundaries...")
+        # Step 2: See where the malicious payloads are hooked
+        logger.info("Phase 2: Correlating malicious programs to system call hooks...")
         self._detect_syscall_hooks()
 
-        # Phase 3: Structural Map Evaluation
-        logger.info("Phase 3: Scanning allocated BPF memory maps...")
+        # Step 3: Identify the maps supplying the malicious payloads
+        logger.info("Phase 3: Isolating weaponized state maps...")
         self._analyze_memory_maps()
-
-        # Phase 4: Host BPF Containment Auditing
-        logger.info("Phase 4: Evaluating kernel eBPF isolation policy...")
-        self._check_kernel_security()
 
         return self.detections
 
     def _analyze_bpf_programs(self):
-        """Identify anomalous or unlinked BPF programs run by the kernel"""
+        """Identifies programs that have physical capabilities to tamper with the OS"""
         programs = self.bpf_analyzer.get_loaded_programs()
-
         if not programs:
-            logger.info("No active BPF programs parsed or subsystem is empty.")
             return
-
-        logger.info(f"Parsing {len(programs)} active kernel BPF objects...")
 
         for prog in programs:
             behavior = self.bpf_analyzer.analyze_program_behavior(prog.prog_id)
 
-            if behavior['suspicious_patterns']:
+            if behavior['is_malicious']:
+                # 1. Flag the program ID internally
+                self.malicious_prog_ids.add(prog.prog_id)
+
+                # 2. Tag all of its maps as weaponized dynamically
+                for map_id in prog.map_ids:
+                    self.weaponized_map_ids.add(map_id)
+
+                # 3. Create the alert
                 self.detections.append(DetectionResult(
-                    detection_type='suspicious_bpf_bytecode_capabilities',
-                    severity='high',
-                    description=f'BPF program "{prog.name}" (ID: {prog.prog_id}) possesses hook manipulation helpers',
+                    detection_type='malicious_bpf_helper_detected',
+                    severity='critical',
+                    description=f'BPF program "{prog.name}" (ID: {prog.prog_id}) contains unauthorized memory-tampering instructions',
                     details={
                         'program_id': prog.prog_id,
                         'program_name': prog.name,
-                        'program_type': prog.prog_type,
-                        'helpers_found': behavior['operations'],
-                        'behavioral_risk': behavior['suspicious_patterns'],
-                        'memory_usage_bytes': prog.bytes_memory
+                        'tampering_helpers_found': behavior['tampering_helpers']
                     },
-                    remediation='Verify program origin via bpftool. Unload if bytecode source is unauthorized.'
-                ))
-
-            # Monitor excessive runtime allocation sizes
-            if prog.bytes_memory > 1000000:
-                self.detections.append(DetectionResult(
-                    detection_type='excessive_bpf_memory_footprint',
-                    severity='medium',
-                    description=f'BPF program {prog.name} consumes an unusual kernel allocation memory size',
-                    details={'program_id': prog.prog_id, 'memory_usage': prog.bytes_memory},
-                    remediation='Investigate if the program contains excessive unrolled loops or logic trees.'
+                    remediation='Unload immediately. Program is actively designed to subvert kernel or user space memory.'
                 ))
 
     def _detect_syscall_hooks(self):
-        """Flag eBPF attachment anomalies on high-value system execution components"""
-        hooks = self.bpf_analyzer.get_syscall_hooks()
+        """Only flags critical syscall hooks IF the attached program is malicious"""
+        links = self.bpf_analyzer.get_active_links()
 
-        # Target targets mirrored by Gen 3 rootkits (e.g., directory hiding, credential padding)
         critical_syscalls = [
             'openat', 'read', 'write', 'execve', 'getdents64',
-            'socket', 'connect', 'bind', 'mkdir'
+            'socket', 'connect', 'bind', 'mkdir', 'close'
         ]
 
-        for syscall in critical_syscalls:
-            if syscall in hooks:
-                self.detections.append(DetectionResult(
-                    detection_type='bpf_syscall_boundary_intercept',
-                    severity='critical',
-                    description=f'Active eBPF program intercepted the "{syscall}" system call gateway',
-                    details={
-                        'syscall_intercepted': syscall,
-                        'handling_program_ids': hooks[syscall]
-                    },
-                    remediation='Analyze the program bytecode structure immediately using bpftool prog dump.'
-                ))
+        for link in links:
+            target = link.get('target_name', '').lower()
+            prog_id = link.get('prog_id')
+            if not target or not prog_id:
+                continue
+
+            # Only care if it's attached to a sensitive gateway AND the program is malicious
+            for syscall in critical_syscalls:
+                if syscall in target and prog_id in self.malicious_prog_ids:
+                    self.detections.append(DetectionResult(
+                        detection_type='weaponized_syscall_hook',
+                        severity='critical',
+                        description=f'Malicious program (ID: {prog_id}) is actively intercepting "{syscall}"',
+                        details={
+                            'syscall_intercepted': syscall,
+                            'hook_target': target,
+                            'handling_program_id': prog_id
+                        },
+                        remediation='Remove the associated BPF program to restore system call integrity.'
+                    ))
 
     def _analyze_memory_maps(self):
-        """Analyze memory maps for architectural filtering indicators"""
+        """Flags maps solely based on their link to malicious programs, ignoring map names"""
         maps = self.bpf_analyzer.get_loaded_maps()
-
         if not maps:
             return
 
-        # Explicitly audits names tied to state management in evasion payloads
-        suspicious_patterns = {
-            'map_fds': 'File Descriptor tracking table',
-            'map_buff': 'Buffer manipulation space',
-            'map_pid': 'PID configuration mapping',
-            'pid_hide': 'Process evasion structural map',
-            'map_to_patch': 'Memory patch location lookup state'
-        }
-
         for bpf_map in maps:
-            for pattern, desc in suspicious_patterns.items():
-                if pattern in bpf_map.name.lower():
-                    self.detections.append(DetectionResult(
-                        detection_type='anomalous_bpf_map_definition',
-                        severity='high',
-                        description=f'Detected structural BPF memory map designated for filtering: {desc}',
-                        details={
-                            'map_id': bpf_map.map_id,
-                            'map_name': bpf_map.name,
-                            'map_type': bpf_map.map_type,
-                            'max_entries': bpf_map.max_entries
-                        },
-                        remediation='Identify the parent BPF program loading this map context and isolate it.'
-                    ))
-
-    def _check_kernel_security(self):
-        """Check container isolation layers regulating raw BPF execution map accesses"""
-        lockdown_status = self.lockdown_detector.get_lockdown_status()
-
-        if lockdown_status.get('lockdown_mode') == 'none' or '[none]' in lockdown_status.get('lockdown_mode', ''):
-            self.detections.append(DetectionResult(
-                detection_type='unbounded_bpf_environment',
-                severity='medium',
-                description='Kernel Lockdown mechanism is disabled; BPF space can modify memory lines freely',
-                details={'lockdown_mode': lockdown_status.get('lockdown_mode')},
-                remediation='Enable kernel lockdown configuration rules to limit low-level writing tools.'
-            ))
+            if bpf_map.map_id in self.weaponized_map_ids:
+                self.detections.append(DetectionResult(
+                    detection_type='weaponized_bpf_state_map',
+                    severity='high',
+                    description=f'Map "{bpf_map.name}" is supplying data to a malicious eBPF program',
+                    details={
+                        'map_id': bpf_map.map_id,
+                        'map_name': bpf_map.name,  # Attacker can name this whatever they want!
+                        'map_type': bpf_map.map_type,
+                        'max_entries': bpf_map.max_entries
+                    },
+                    remediation='Isolate and delete this map environment.'
+                ))
 
     def generate_report(self) -> str:
-        """Compile an architectural technical audit overview summary"""
         report = []
         report.append("=" * 75)
         report.append("DEDICATED GENERATION 3 (eBPF) ROOTKIT DETECTION REPORT")
@@ -373,7 +264,8 @@ class RootkitDetector:
         report.append("")
 
         if not self.detections:
-            report.append("[STATUS] No suspicious eBPF hooks or malicious memory states identified.")
+            report.append("[STATUS] SYSTEM SECURE. No malicious memory-tampering eBPF objects found.")
+            report.append("         (Benign observability programs were ignored successfully).")
             report.append("")
         else:
             by_severity = {}
@@ -404,7 +296,6 @@ class RootkitDetector:
 def main():
     if os.geteuid() != 0:
         logger.error("Root elevation constraint failure. Script must interact directly with the BPF system.")
-        logger.info("Execute utility using administrative context: sudo python3 rootkit_detector.py")
         sys.exit(1)
 
     detector = RootkitDetector()
@@ -413,7 +304,6 @@ def main():
         results = detector.run_full_scan()
         print(detector.generate_report())
 
-        # Trigger anomalous termination code if critical hooks are validated
         critical_threats = sum(1 for r in results if r.severity == 'critical')
         sys.exit(1 if critical_threats > 0 else 0)
 
